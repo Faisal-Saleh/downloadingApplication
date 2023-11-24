@@ -2,6 +2,7 @@
 //#include "urlsmanager.h"
 //#include "downloader.h"
 #include <gumbo.h>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
@@ -11,11 +12,15 @@
 #include <curl/curl.h>
 #include <functional>
 #include <assert.h>
+#include <vector>
+#include "json.hpp"
 
+using json = nlohmann::json;
 using namespace std;
+namespace fs = filesystem;
 
 // Callback function to write received data to a string
-size_t text_callback(void* contents, size_t size, size_t nmemb, std::string* output) {
+size_t text_callback(void* contents, size_t size, size_t nmemb, string* output) {
     size_t total_size = size * nmemb;
     output->append((char*)contents, total_size);
     return total_size;
@@ -68,9 +73,9 @@ void download_content(const char* url, const char* file_name) {
 string extract_base_url(string& url) {
     // Find the position of the first '/' after the "://" part
     size_t pos = url.find("://");
-    if (pos != std::string::npos) {
+    if (pos != string::npos) {
         pos = url.find('/', pos + 3); // Skip the "://" part and find the next '/'
-        if (pos != std::string::npos) {
+        if (pos != string::npos) {
             return url.substr(0, pos);
         }
     }
@@ -109,7 +114,7 @@ void extract_content(GumboNode* node, string& base_url) {
             if (url.find("base64") == string::npos) {
                 cout << "Found content: " << url << endl;
                 string filename = url.substr(url.find_last_of('/') + 1);
-                string path = "downloads/" + filename;
+                string path = "contents/" + filename;
                 download_content(url.c_str(), path.c_str());
             } //TODO: maybe decode it and save it in the future
         }
@@ -149,7 +154,7 @@ void extract_text(GumboNode* node, ofstream& file) {
  *                     the content.
  * @param file_name    the file name that we store the text at.
  */
-void parse_html(const char* html_content, string& base_url, const char* file_name) {
+void parse_html(const char* html_content, string& base_url, string& file_name) {
     ofstream file(file_name);
     GumboOutput* output = gumbo_parse(html_content);
     extract_text(output->root, file);
@@ -186,16 +191,45 @@ void download_html(const char* url, string& downloaded_html) {
     }
 }
 
-int main() {
-    // Set the url to download
-    const char* url = "https://sponixtech.com/spboard-technology/";
-    const char* file_name = "downloaded_file.txt";
-    string html;
-    string base_url(url);
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " <json_file_path>" << endl;
+        return 1;
+    }
 
-    base_url = extract_base_url(base_url);
-    download_html(url, html);
-    parse_html(html.c_str(), base_url, file_name);
+    string json_file_path = argv[1];
+
+    // Read json from file
+    ifstream file(json_file_path);
+    if (!file.is_open()) {
+        cerr << "Error opening file: " << json_file_path << endl;
+        return 1;
+    }
+
+    json data;
+    file >> data;
+
+    // Read from the json data the urls and depths and store them in a vector
+    vector<pair<string, int>> url_depth_vector;
+    for (const auto& entry : data) {
+        url_depth_vector.emplace_back(entry["url"], entry["depth"]);
+    }
+
+    for (const auto& entry : url_depth_vector) {
+        string url = entry.first;
+        string fname = url.substr(6); //remove https:
+        fname.erase(remove(fname.begin(), fname.end(), '.'), fname.end());
+        fname.erase(remove(fname.begin(), fname.end(), '/'), fname.end());
+        string file_name = "text/" + fname + ".txt";
+        string base_url = extract_base_url(url);
+        string html;
+
+        fs::create_directory("text");
+        fs::create_directory("contents");
+
+        download_html(url.c_str(), html);
+        parse_html(html.c_str(), base_url, file_name);
+    }
 
     return 0;
 }
