@@ -22,57 +22,28 @@ size_t text_callback(void* contents, size_t size, size_t nmemb, std::string* out
 }
 
 // Callback function for libcurl to write downloaded content to a file
-static size_t image_callback(void* contents, size_t size, size_t nmemb, FILE* file) {
+static size_t write_callback(void* contents, size_t size, size_t nmemb, FILE* file) {
     return fwrite(contents, size, nmemb, file);
 }
 
-std::string makeAbsoluteUrl(const string& baseUrl, const string& relativeUrl) {
-    // Check if the relative URL is already an absolute URL
-    if (relativeUrl.find("://") != std::string::npos) {
-        return relativeUrl; // Already an absolute URL
-    }
-
-    // Parse the base URL to extract the scheme and authority
-    std::istringstream baseStream(baseUrl);
-    std::string scheme, authority;
-    baseStream >> scheme;
-    std::getline(baseStream, authority, '/'); // Extract authority (domain and port)
-
-    // Remove trailing slashes from the base URL
-    authority.erase(std::remove(authority.begin(), authority.end(), '/'), authority.end());
-
-    // Combine the scheme, authority, and relative path to form the absolute URL
-    std::ostringstream absoluteUrl;
-    absoluteUrl << scheme << "://" << authority << '/' << relativeUrl;
-
-    return absoluteUrl.str();
-}
-
-string gen_filename(string& url) {
-    // Find the last '/' in the URL
-    size_t lastSlashPos = url.rfind('/');
-    
-    // Check if a slash was found
-    if (lastSlashPos != std::string::npos) {
-        // Extract the substring after the last '/'
-        return url.substr(lastSlashPos + 1);
-    }
-    assert(false); // this should work all the time 
-    //(TODO: change this to exception throw later)
-    return "";
-}
-
-
-// Function to download an image from a URL and save it to a file
-void download_image(const char* image_url, const char* file_name) {
+/**
+ * @brief Function to download the content at the given url and
+ *        save it in a file that has the name file_name.
+ *        The content that this function might store could be 
+ *        an image or an audio or a video
+ * 
+ * @param url  The http url that we need to perform a get request at.
+ * @param file_name The name of the file we need to create and save the content in
+ */
+void download_content(const char* url, const char* file_name) {
     CURL* curl = curl_easy_init();
 
     if (curl) {
         FILE* file = fopen(file_name, "wb");
 
         if (file) {
-            curl_easy_setopt(curl, CURLOPT_URL, image_url);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, image_callback);
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
 
             // Perform the request
@@ -107,34 +78,52 @@ string extract_base_url(string& url) {
     return ""; // Return an empty string if no match is found
 }
 
-void extract_images(GumboNode* node, string& base_url) {
+/**
+ * @brief Recursively visits the Gumbo nodes and if it finds content
+ *        that should be downloaded sets up the url and the filename
+ *        to call the download_content function.
+ * 
+ * @param node The current GumboNode we are pointing at.
+ * @param base_url the base url in case the content is stored with 
+ *                 a relative url.
+ */
+void extract_content(GumboNode* node, string& base_url) {
     if (node->type == GUMBO_NODE_ELEMENT) {
         GumboAttribute* src = nullptr;
 
-        if (node->v.element.tag == GUMBO_TAG_IMG && 
+        // Checks if the node is an (image or a video or an audio) and has a src
+        if ((node->v.element.tag == GUMBO_TAG_VIDEO  ||
+            node->v.element.tag == GUMBO_TAG_IMG     ||
+            node->v.element.tag == GUMBO_TAG_AUDIO)  &&
             (src = gumbo_get_attribute(&node->v.element.attributes, "src"))) {
-            string image_url(src->value);
+                
+            string url(src->value);
 
-            // Check if the relative URL is already an absolute URL
-            if (image_url.find("://") == std::string::npos) {
-                image_url = base_url + image_url; // a relative URL is found
+            // Check if the url is already an absolute one
+            if (url.find("://") == string::npos) {
+                cout << "found a relative url" << endl;
+                url = base_url + url; // a relative url is found
             }
-            cout << "Found image: " << image_url << endl;
-            string filename = gen_filename(image_url);
-            download_image(image_url.c_str(), filename.c_str());
-        }
 
+            // Check if the url is base64 encoded, if it is skip
+            if (url.find("base64") == string::npos) {
+                cout << "Found content: " << url << endl;
+                string filename = url.substr(url.find_last_of('/') + 1);
+                string path = "downloads/" + filename;
+                download_content(url.c_str(), path.c_str());
+            } //TODO: maybe decode it and save it in the future
+        }
+        
         // Recursive call to visit child nodes
         GumboVector* children = &node->v.element.children;
         for (size_t i = 0; i < children->length; i++) {
-            extract_images((GumboNode*)(children->data[i]), base_url);
+            extract_content((GumboNode*)(children->data[i]), base_url);
         }
     }
 }
 
-
 // Function to recursively extract text content
-void extract_text(const GumboNode* node, ofstream& file) {
+void extract_text(GumboNode* node, ofstream& file) {
     if (node->type == GUMBO_NODE_TEXT) {
         cout << node->v.text.text << " ";
         file << node->v.text.text << " ";
@@ -142,32 +131,41 @@ void extract_text(const GumboNode* node, ofstream& file) {
                node->v.element.tag != GUMBO_TAG_SCRIPT &&
                node->v.element.tag != GUMBO_TAG_STYLE) {
         
-        GumboVector children = node->v.element.children;
-        for (size_t i = 0; i < children.length; i++) {
-            extract_text((GumboNode*)children.data[i], file);
+        // Recursive call to visit child nodes
+        GumboVector* children = &node->v.element.children;
+        for (size_t i = 0; i < children->length; i++) {
+            extract_text((GumboNode*)children->data[i], file);
         }
     }
 }
 
-// Function to parse HTML and extract text content using Gumbo Parser
-void parse_html_and_save_text(const string& html, const char* file_name) {
+/**
+ * @brief  Function to parse HTML and extract the text, images, audios
+ *         and videos using the gumbo parser
+ * 
+ * @param html_content pure html string
+ * @param base_url     some content is given as relaticve urls so we use this 
+ *                     to find the absolute url and use curl again to retrieve
+ *                     the content.
+ * @param file_name    the file name that we store the text at.
+ */
+void parse_html(const char* html_content, string& base_url, const char* file_name) {
     ofstream file(file_name);
-    GumboOutput* output = gumbo_parse(html.c_str());
-    if (output) {
-        extract_text(output->root, file);
-        gumbo_destroy_output(&kGumboDefaultOptions, output);
-    }
+    GumboOutput* output = gumbo_parse(html_content);
+    extract_text(output->root, file);
+    extract_content(output->root, base_url);
+    gumbo_destroy_output(&kGumboDefaultOptions, output);
     file.close();
 }
 
-void parse_html(const char* html_content, string& base_url) {
-    GumboOutput* output = gumbo_parse(html_content);
-    extract_images(output->root, base_url);
-    gumbo_destroy_output(&kGumboDefaultOptions, output);
-}
-
-
-void download_html(const char* url, std::string& downloaded_html) {
+/**
+ * @brief This function is called at the beginning to download the pure html
+ *        at the given url and store it inside the given string.
+ * 
+ * @param url Html link that we need to retreive the pure html from.
+ * @param downloaded_html String that we save the html in.
+ */
+void download_html(const char* url, string& downloaded_html) {
     CURL* curl = curl_easy_init();
 
     if (curl) {
@@ -189,17 +187,15 @@ void download_html(const char* url, std::string& downloaded_html) {
 }
 
 int main() {
-    // Set the URL to download
-    const char* url = "https://www.w3schools.com/graphics/svg_inhtml.asp";
+    // Set the url to download
+    const char* url = "https://sponixtech.com/spboard-technology/";
     const char* file_name = "downloaded_file.txt";
     string html;
     string base_url(url);
 
     base_url = extract_base_url(base_url);
-
     download_html(url, html);
-    // parse_html_and_save_text(html, file_name);
-    parse_html(html.c_str(), base_url);
+    parse_html(html.c_str(), base_url, file_name);
 
     return 0;
 }
