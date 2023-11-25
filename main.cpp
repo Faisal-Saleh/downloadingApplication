@@ -70,6 +70,8 @@ void download_content(const char* url, const char* file_name) {
     }
 }
 
+// Function that manually extracts the base url (header)
+// from the full url given in the json file.
 string extract_base_url(string& url) {
     // Find the position of the first '/' after the "://" part
     size_t pos = url.find("://");
@@ -83,46 +85,98 @@ string extract_base_url(string& url) {
     return ""; // Return an empty string if no match is found
 }
 
+string get_url_content_type(const char* url) {
+    CURL* curl;
+    CURLcode res;
+
+    curl = curl_easy_init();
+
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+
+        // Set the callback function to handle the response
+        string response;
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, text_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        // Perform the request
+        res = curl_easy_perform(curl);
+
+        if (res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            // Check the Content-Type header in the response
+            char* content_type;
+            res = curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &content_type);
+
+            if (res == CURLE_OK) {
+                string result(content_type);
+                // Clean up
+                curl_easy_cleanup(curl);
+                return result;
+            } else {
+                fprintf(stderr, "curl_easy_getinfo() failed: %s\n", curl_easy_strerror(res));
+                // Clean up
+                curl_easy_cleanup(curl);
+                return "";
+            }
+        }
+    }
+    
+    // Clean up
+    curl_easy_cleanup(curl);
+
+    return "";
+
+}
+
 /**
- * @brief Recursively visits the Gumbo nodes and if it finds content
- *        that should be downloaded sets up the url and the filename
- *        to call the download_content function.
+ * @brief Recursively visits the Gumbo nodes and gets the content type of the
+ *        current node. If it finds content that should be downloaded it will
+ *        setup the filename and call the download_content function to download
+ *        that content. If it finds a url that we can visit it should add it 
+ *        to the list of new urls we should visit.
  * 
- * @param node The current GumboNode we are pointing at.
- * @param base_url the base url in case the content is stored with 
- *                 a relative url.
+ * @param node     The current GumboNode we are pointing at.
+ * @param base_url The base url in case we find a relative url.
  */
-void extract_content(GumboNode* node, string& base_url) {
+void extract_urls(GumboNode* node, string& base_url) {
     if (node->type == GUMBO_NODE_ELEMENT) {
-        GumboAttribute* src = nullptr;
+        GumboAttribute *attr = nullptr;
+        attr = gumbo_get_attribute(&node->v.element.attributes, "href");
+        if (!attr) 
+            attr = gumbo_get_attribute(&node->v.element.attributes, "src");
 
-        // Checks if the node is an (image or a video or an audio) and has a src
-        if ((node->v.element.tag == GUMBO_TAG_VIDEO  ||
-            node->v.element.tag == GUMBO_TAG_IMG     ||
-            node->v.element.tag == GUMBO_TAG_AUDIO)  &&
-            (src = gumbo_get_attribute(&node->v.element.attributes, "src"))) {
-                
-            string url(src->value);
-
+        if (attr) {
+            string url(attr->value);
             // Check if the url is already an absolute one
             if (url.find("://") == string::npos) {
                 cout << "found a relative url" << endl;
                 url = base_url + url; // a relative url is found
             }
 
-            // Check if the url is base64 encoded, if it is skip
-            if (url.find("base64") == string::npos) {
-                cout << "Found content: " << url << endl;
+            // cout << "Found URL: " << url << endl;
+            string content_type = get_url_content_type(url.c_str());
+
+            // If the content is an image or a video or an audio download it.
+            // Note: if the content is base64 encoded it will not recognize it
+            // TODO: take care of this later (maybe?)
+            if (content_type.find("image") != string::npos ||
+                content_type.find("video") != string::npos ||
+                content_type.find("audio") != string::npos) {
+                
                 string filename = url.substr(url.find_last_of('/') + 1);
                 string path = "contents/" + filename;
-                download_content(url.c_str(), path.c_str());
-            } //TODO: maybe decode it and save it in the future
+                download_content(url.c_str(), path.c_str()); 
+            } else if (content_type.find("html") != string::npos) {
+                // Add this to the list of urls we extracted
+            }
+            
         }
-        
-        // Recursive call to visit child nodes
+
         GumboVector* children = &node->v.element.children;
-        for (size_t i = 0; i < children->length; i++) {
-            extract_content((GumboNode*)(children->data[i]), base_url);
+        for (unsigned int i = 0; i < children->length; ++i) {
+            extract_urls(static_cast<GumboNode*>(children->data[i]), base_url);
         }
     }
 }
@@ -130,7 +184,7 @@ void extract_content(GumboNode* node, string& base_url) {
 // Function to recursively extract text content
 void extract_text(GumboNode* node, ofstream& file) {
     if (node->type == GUMBO_NODE_TEXT) {
-        cout << node->v.text.text << " ";
+        // cout << node->v.text.text << " ";
         file << node->v.text.text << " ";
     } else if (node->type == GUMBO_NODE_ELEMENT &&
                node->v.element.tag != GUMBO_TAG_SCRIPT &&
@@ -158,7 +212,7 @@ void parse_html(const char* html_content, string& base_url, string& file_name) {
     ofstream file(file_name);
     GumboOutput* output = gumbo_parse(html_content);
     extract_text(output->root, file);
-    extract_content(output->root, base_url);
+    extract_urls(output->root, base_url);
     gumbo_destroy_output(&kGumboDefaultOptions, output);
     file.close();
 }
